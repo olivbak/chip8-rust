@@ -245,8 +245,9 @@ impl<'a> CPU <'a>{
 	return PCAction::Forward(1)
     }
 
-    fn inst_8xye(&mut self, x: usize, y: usize) -> PCAction {
-	self.v[x] ^= self.v[y];
+    fn inst_8xye(&mut self, x: usize, _y: usize) -> PCAction {
+	self.v[0x0f] = (self.v[x] & 0b10000000) >> 7;
+        self.v[x] <<= 1;
 	return PCAction::Forward(1)
     }
 
