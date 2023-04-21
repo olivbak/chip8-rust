@@ -2,6 +2,7 @@ extern crate rand;
 
 use rand::Rng;
 use crate::memory::Memory;
+use crate::vram::Vram;
 
 enum PCAction {
     Forward(usize), // forwards by X opcodes
@@ -9,6 +10,7 @@ enum PCAction {
 }
 
 pub struct CPU <'a>{
+    vram: &'a mut Vram,
     ram: &'a mut Memory,
     stack: [usize; 16],
     i: usize,
@@ -17,12 +19,14 @@ pub struct CPU <'a>{
     pc: usize,
     delay_timer: u8,
     sound_timer: u8,
+    keymap: [bool; 16]
 }
 
 impl<'a> CPU <'a>{
 
-    pub fn init(mem : &'a mut Memory) -> CPU <'a>{
+    pub fn init(mem : &'a mut Memory, vram : &'a mut Vram) -> CPU <'a>{
 	CPU {
+	    vram: vram,
 	    ram: mem,
 	    stack: [0;16],
 	    i: 0,
@@ -31,12 +35,26 @@ impl<'a> CPU <'a>{
 	    v: [0;16],
 	    delay_timer: 0,
 	    sound_timer: 0,
+	    keymap: [false;16]
 	}
     }
 
-    // runs the opcode at program counter
+    pub fn fetch_vram(&mut self) -> Vram {
+	return *self.vram;
+    }
+
     pub fn fetch_opcode(&mut self) -> u16 {
-	return Memory::fetch_opcode(&mut self.ram, self.sp);
+	return Memory::fetch_opcode(&mut self.ram, self.pc);
+    }
+    pub fn set_keymap(&mut self, keymap: [bool;16]) -> () {
+	self.keymap = keymap;
+    }
+
+    pub fn decrement_timers(&mut self) -> () {
+	self.delay_timer =
+	    if self.delay_timer > 0 { self.delay_timer - 1} else { 0 };
+	self.sound_timer =
+	    if self.sound_timer > 0 { self.sound_timer - 1} else { 0 };
     }
 
     pub fn execute_opcode(&mut self, opcode: u16) -> () {
@@ -52,9 +70,13 @@ impl<'a> CPU <'a>{
         let y = opcode_half_bytes.2 as usize;
         let n = opcode_half_bytes.3 as usize;
 
+	match opcode_half_bytes {
+	    (a,b,c,d) => println!("opcode: {}, {}, {}, {}\n pc: {}", a,b,c,d, self.pc)
+	}
+
 	let delta_pc = match opcode_half_bytes {
 	    (0x00, 0x00, 0x0e, 0x00) => self.inst_00e0(),
-	    (0x00, 0x00, 0x0e, 0x03) => self.inst_00ee(),
+	    (0x00, 0x00, 0x0e, 0x0e) => self.inst_00ee(),
 	    (0x01, _, _, _) => self.inst_1nnn(nnn),
             (0x02, _, _, _) => self.inst_2nnn(nnn),
             (0x03, _, _, _) => self.inst_3xnn(x, nn),
@@ -87,19 +109,22 @@ impl<'a> CPU <'a>{
             (0x0f, _, 0x03, 0x03) => self.inst_fx33(x),
             (0x0f, _, 0x05, 0x05) => self.inst_fx55(x),
             (0x0f, _, 0x06, 0x05) => self.inst_fx65(x),
-	    (_, _, _, _) => PCAction::Forward(1)
+	    (_, _, _, _) => {
+		println!("skip");
+		PCAction::Forward(1)
+	    }
 	};
 
 	self.pc = match delta_pc {
 	    PCAction::Set(x) => x,
-	    PCAction::Forward(x) => x*2
+	    PCAction::Forward(x) => self.pc + x*2
 	}
 
     }
 
     //OPCODE: clear display
     fn inst_00e0(&mut self) -> PCAction {
-	//TODO: clear display
+	*self.vram = Vram::init();
 	return PCAction::Forward(1)
     }
 
@@ -116,8 +141,7 @@ impl<'a> CPU <'a>{
 
     //CALL
     fn inst_2nnn(&mut self, nnn: usize) -> PCAction {
-	// TODO self.pc or self.pc+=2?
-	self.stack[self.sp] = self.pc;
+	self.stack[self.sp] = self.pc+2;
 	self.sp += 1;
 	return PCAction::Set(nnn);
     }
@@ -221,8 +245,8 @@ impl<'a> CPU <'a>{
 	return PCAction::Forward(1)
     }
 
-    fn inst_8xye(&mut self, _x: usize, _y: usize) -> PCAction {
-	//TODO
+    fn inst_8xye(&mut self, x: usize, y: usize) -> PCAction {
+	self.v[x] ^= self.v[y];
 	return PCAction::Forward(1)
     }
 
@@ -248,20 +272,35 @@ impl<'a> CPU <'a>{
 	return PCAction::Forward(1)
     }
 
-
-    fn inst_dxyn(&mut self, _x: usize, _y: usize, _n: usize) -> PCAction {
-	//TODO draw
+    fn inst_dxyn(&mut self, x: usize, y: usize, n: usize) -> PCAction {
+	self.v[0x0f] = 0;
+        for byte in 0..n {
+            let y = (self.v[y] as usize + byte) % crate::vram::VRAM_HEIGHT;
+            for bit in 0..8 {
+                let x = (self.v[x] as usize + bit) % crate::vram::VRAM_WIDTH;
+                let color = (self.ram.fetch(self.i + byte) >> (7 - bit)) & 1;
+                self.v[0x0f] |= color & self.vram.fetch(y,x);
+		let new_val = self.vram.fetch(y,x) ^ color;
+                self.vram.set(y, x, new_val)
+            }
+        }
 	return PCAction::Forward(1)
     }
 
-    fn inst_ex9e(&mut self, _x: usize) -> PCAction {
-	//TODO keypad related
-	return PCAction::Forward(1)
+    fn inst_ex9e(&mut self, x: usize) -> PCAction {
+	if self.keymap[self.v[x] as usize] {
+	    return PCAction::Forward(2)
+	} else {
+	    return PCAction::Forward(1)
+	}
     }
 
-    fn inst_exa1(&mut self, _x: usize) -> PCAction {
-	//TODO keypad related
-	return PCAction::Forward(1)
+    fn inst_exa1(&mut self, x: usize) -> PCAction {
+	if !self.keymap[self.v[x] as usize] {
+	    return PCAction::Forward(2)
+	} else {
+	    return PCAction::Forward(1)
+	}
     }
 
     fn inst_fx07(&mut self, x: usize) -> PCAction {
@@ -269,9 +308,19 @@ impl<'a> CPU <'a>{
 	return PCAction::Forward(1)
     }
 
-    fn inst_fx0a(&mut self, _x: usize) -> PCAction {
+    fn inst_fx0a(&mut self, x: usize) -> PCAction {
 	//TODO key related
-	return PCAction::Forward(1)
+	return match self.keymap.iter()
+	    .enumerate()
+	    .find(|x| match x {(_,v) => **v})
+	{
+	    None => PCAction::Forward(0),
+	    Some(v) => {
+		let (key,_) = v;
+		self.v[x] = key as u8;
+		PCAction::Forward(1)
+	    }
+	}
     }
 
     fn inst_fx15(&mut self, x: usize) -> PCAction {
@@ -294,10 +343,12 @@ impl<'a> CPU <'a>{
 	return PCAction::Forward(1)
     }
 
-    fn inst_fx33(&mut self, _x: usize) -> PCAction {
-	//TODO
+    fn inst_fx33(&mut self, x: usize) -> PCAction {
+        self.ram.set(self.i, self.v[x] / 100);
+        self.ram.set(self.i + 1, (self.v[x] % 100) / 10);
+        self.ram.set(self.i + 2, self.v[x] % 10);
 	return PCAction::Forward(1)
-    }
+    }	
 
     fn inst_fx55(&mut self, x: usize) -> PCAction {
 	for i in 0..x+1 {
